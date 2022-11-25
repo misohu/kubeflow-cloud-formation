@@ -1,0 +1,408 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Mappings:
+  RegionMap:
+    eu-central-1:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    us-east-1:
+      AMI: ami-072d6c9fae3253f26
+    us-gov-east-1:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    us-gov-west-1:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    us-east-2:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    us-west-1:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    us-west-2:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    ca-central-1:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    eu-central-1:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    eu-west-1:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    eu-west-2:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    eu-west-3:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    eu-north-1:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    eu-south-1:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    ap-east-1:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    ap-southeast-1:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    ap-southeast-2:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    ap-south-1:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    ap-northeast-1:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    ap-northeast-2:
+      AMI: ami-xxxxxxxxxxxxxxxxx
+    me-south-1:
+      AMI: ami-xxxxxxxxxxxxxxxxx 
+Description: ""
+Parameters:
+  AppName:
+    Description: Name of the application the cluster will serve
+    Type: String
+    MinLength: "3"
+    AllowedPattern: '[a-zA-Z0-9\(\)\.\-/_]+'
+    Default: "MicroK8s"
+  KeyPair:
+    Description: Amazon EC2 Key Pair used to ssh to the cluster nodes
+    Type: "AWS::EC2::KeyPair::KeyName"
+  InstanceTypeParameter:
+    Type: String
+    Default: m4.2xlarge
+    AllowedValues:
+      - m4.large
+      - m4.xlarge
+      - m4.2xlarge
+    Description: Select the instance type of the cluster nodes
+  KubernetesVersion:
+    Type: String
+    Default: 1.22
+    AllowedValues:
+      - 1.23
+      - 1.22
+      - 1.21
+    Description: The Kubernetes version
+  KubeflowVersion:
+    Type: String
+    Default: 1.6/stable
+    AllowedValues:
+      - 1.6/stable
+      - latest/stable
+      - latest/edge
+    Description: The Kubeflow version to be deployed
+  KubeflowDashboardUsername:
+    Type: String
+    MinLength: "5"
+    AllowedPattern: '[a-zA-Z0-9\(\)\.\-/_@]+'
+    Default: "user123@email.com"
+  KubeflowDashboardPassword:
+    Type: String
+    NoEcho : "true"
+    MinLength: "5"
+    AllowedPattern: '[a-zA-Z0-9\(\)\.\-/_@]+'
+    Default: "user123"
+    Description: Default is user123
+Resources:
+  SQSQueue:
+    Type: "AWS::SQS::Queue"
+    Properties:
+      DelaySeconds: "0"
+      MaximumMessageSize: "262144"
+      MessageRetentionPeriod: "345600"
+      ReceiveMessageWaitTimeSeconds: "0"
+      VisibilityTimeout: "30"
+      QueueName: !Sub "${AppName}"
+  SQSQueuePolicy:
+    Type: "AWS::SQS::QueuePolicy"
+    Properties:
+      PolicyDocument:
+        Version: "2008-10-17"
+        Id: SQS-Policy-1
+        Statement:
+          - Sid: !Sub "${AppName}-SQS-1"
+            Effect: Allow
+            Principal:
+              AWS: !Sub "${AWS::AccountId}"
+            Action:
+              - "sqs:*"
+            Resource: !Sub "${SQSQueue.QueueName}"
+          - Sid: !Sub "${AppName}-SQS-2"
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+              - SQS:SendMessage
+            Resource: !GetAtt
+              - SQSQueue
+              - Arn
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SNSTopic.TopicName}"
+      Queues:
+        - !Sub "https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/${SQSQueue.QueueName}"
+    DependsOn: "SQSQueue"
+  SNSTopic:
+    Type: "AWS::SNS::Topic"
+    Properties:
+      DisplayName: "Foo"
+      TopicName: !Sub "${AppName}"
+  SNSSubscription:
+    Type: "AWS::SNS::Subscription"
+    Properties:
+      TopicArn: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SNSTopic.TopicName}"
+      Endpoint: !GetAtt
+        - SQSQueue
+        - Arn
+      Protocol: "sqs"
+      RawMessageDelivery: "false"
+      Region: !Ref AWS::Region
+    DependsOn: "SNSTopic"
+  SNSTopicPolicy:
+    Type: "AWS::SNS::TopicPolicy"
+    Properties:
+      PolicyDocument:
+        Version: "2008-10-17"
+        Id: SNSSubscriptionPolicy
+        Statement:
+          - Sid: SNSSubscriptionPolicySid
+            Effect: Allow
+            Principal:
+              AWS: !Sub "${AWS::AccountId}"
+            Action:
+              - SNS:GetTopicAttributes
+              - SNS:SetTopicAttributes
+              - SNS:AddPermission
+              - SNS:RemovePermission
+              - SNS:DeleteTopic
+              - SNS:Subscribe
+              - SNS:ListSubscriptionsByTopic
+              - SNS:Publish
+              - SNS:Receive
+            Resource: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SNSTopic.TopicName}"
+            Condition:
+              StringEquals:
+                AWS:SourceOwner: !Sub "${AWS::AccountId}"
+      Topics:
+        - !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SNSTopic.TopicName}"
+    DependsOn: [SNSTopic]
+  EC2LaunchTemplate:
+    Type: "AWS::EC2::LaunchTemplate"
+    Properties:
+      LaunchTemplateName: !Sub "${AppName}"
+      LaunchTemplateData:
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+
+            apt update
+            apt -y upgrade
+            for snap in juju juju-wait charmcraft; do sudo snap install $snap --classic; done
+            snap install joule-expansion --classic
+            snap install microk8s --classic --channel=${KubernetesVersion}/stable
+            sudo snap refresh charmcraft --channel latest/candidate
+            usermod -a -G microk8s ubuntu
+            mkdir /home/ubuntu/.kube
+            chown -f -R ubuntu /home/ubuntu/.kube
+            snap set joule-expansion provider=aws
+            snap set joule-expansion applications=microk8s
+
+            microk8s enable dns storage metallb:"10.64.140.43-10.64.140.49,192.168.0.105-192.168.0.111"
+            sleep 120
+            microk8s.kubectl wait --for=condition=available -nkube-system deployment/coredns deployment/hostpath-provisioner
+            microk8s.kubectl -n kube-system rollout status ds/calico-node
+
+            su ubuntu -c 'juju bootstrap microk8s uk8s-controller'
+            su ubuntu -c 'juju add-model kubeflow'
+            su ubuntu -c 'juju deploy kubeflow --channel=${KubeflowVersion} --trust'
+
+            su ubuntu -c 'juju config dex-auth public-url=http://10.64.140.43.nip.io; juju config oidc-gatekeeper public-url=http://10.64.140.43.nip.io; juju config dex-auth static-username=${KubeflowDashboardUsername}; juju config dex-auth static-password=${KubeflowDashboardPassword}'
+            sleep 720
+            echo "Charmed Kubeflow deployed"
+
+            su ubuntu -c 'juju run --unit istio-pilot/0 -- "export JUJU_DISPATCH_PATH=hooks/config-changed; ./dispatch"'
+            su ubuntu -c 'juju deploy mlflow-server'
+            su ubuntu -c 'juju deploy charmed-osm-mariadb-k8s mlflow-db'
+            su ubuntu -c 'juju relate minio mlflow-server'
+            su ubuntu -c 'juju relate istio-pilot mlflow-server'
+            su ubuntu -c 'juju relate mlflow-db mlflow-server'
+            su ubuntu -c 'juju relate mlflow-server admission-webhook'
+            
+            echo "Charmed MlFlow deployed"
+        BlockDeviceMappings:
+          - DeviceName: "/dev/sda1"
+            Ebs:
+              Encrypted: false
+              DeleteOnTermination: true
+              VolumeSize: 100
+              VolumeType: "gp2"
+        IamInstanceProfile:
+          Arn: !GetAtt
+            - InstanceProfile
+            - Arn
+        EbsOptimized: false
+        KeyName: !Sub "${KeyPair}"
+        DisableApiTermination: false
+        ImageId: !FindInMap
+          - RegionMap
+          - !Ref AWS::Region
+          - AMI
+        InstanceType: !Sub "${InstanceTypeParameter}"
+  AutoScalingAutoScalingGroup:
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    Properties:
+      AutoScalingGroupName: !Sub "${AppName}"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref EC2LaunchTemplate
+        Version: 1
+      MinSize: 1
+      MaxSize: 1
+      DesiredCapacity: 1
+      Cooldown: 300
+      AvailabilityZones:
+        Fn::GetAZs:
+          Ref: "AWS::Region"
+      HealthCheckType: "EC2"
+      HealthCheckGracePeriod: 300
+      TerminationPolicies:
+        - "NewestInstance"
+      ServiceLinkedRoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling_${AppName}"
+      NewInstancesProtectedFromScaleIn: false
+      NotificationConfigurations:
+        - NotificationTypes:
+            - autoscaling:EC2_INSTANCE_LAUNCH
+            - autoscaling:EC2_INSTANCE_LAUNCH_ERROR
+            - autoscaling:EC2_INSTANCE_TERMINATE
+            - autoscaling:EC2_INSTANCE_TERMINATE_ERROR
+          TopicARN: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SNSTopic.TopicName}"
+    DependsOn:
+      - EC2LaunchTemplate
+      - SNSTopic
+      - AutoScalingRole
+  AutoScalingScalingPolicy:
+    Type: "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AutoScalingGroupName: !Sub "${AppName}"
+      PolicyType: "SimpleScaling"
+      AdjustmentType: "ChangeInCapacity"
+      ScalingAdjustment: 1
+    DependsOn: "AutoScalingAutoScalingGroup"
+  AutoScalingRole:
+    Type: "AWS::IAM::ServiceLinkedRole"
+    Properties:
+      AWSServiceName: autoscaling.amazonaws.com
+      Description: AutoScaling ServiceLinked Role
+      CustomSuffix: !Sub "${AppName}"
+  EC2Role:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Description: !Sub "${AppName} Role"
+      RoleName: !Sub "${AppName}-EC2Role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Action: autoscaling:DescribeAutoScalingGroups
+                Effect: Allow
+                Resource: "*"
+              - Action: autoscaling:DescribeAutoScalingInstances
+                Effect: Allow
+                Resource: "*"
+              - Action: autoscaling:SetInstanceProtection
+                Effect: Allow
+                Resource: !Sub "arn:*:autoscaling:*:*:autoScalingGroup:*:autoScalingGroupName/${AppName}"
+              - Action: ec2:CreateTags
+                Effect: Allow
+                Resource: "arn:*:ec2:*:*:instance/*"
+              - Action: ec2:DescribeTags
+                Effect: Allow
+                Resource: "*"
+              - Action: sqs:ListQueues
+                Effect: Allow
+                Resource: "*"
+              - Action: sqs:GetQueueUrl
+                Effect: Allow
+                Resource: "*"
+              - Action: sqs:ReceiveMessage
+                Effect: Allow
+                Resource: !Sub "arn:*:sqs:*:*:${AppName}"
+              - Action: sqs:DeleteMessage
+                Effect: Allow
+                Resource: !Sub "arn:*:sqs:*:*:${AppName}"
+              - Action: sqs:SendMessage
+                Effect: Allow
+                Resource: !Sub "arn:*:sqs:*:*:${AppName}"
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+                - lambda.amazonaws.com
+                - ec2.amazonaws.com
+        Version: "2012-10-17"
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Action: autoscaling:DescribeAutoScalingGroups
+                Effect: Allow
+                Resource: "*"
+              - Action: autoscaling:DescribeAutoScalingInstances
+                Effect: Allow
+                Resource: "*"
+              - Action: ec2:CreateTags
+                Effect: Allow
+                Resource: "arn:*:ec2:*:*:instance/*"
+    Metadata:
+      aws:cdk:path: aws-instance-scheduler/SchedulerRole/Resource
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DependsOn: "EC2Role"
+    Properties:
+      InstanceProfileName: !Sub "${AppName}-InstanceProfile"
+      Roles:
+        - !Ref EC2Role
+  LeaderNodeTagger:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - "AutoScalingAutoScalingGroup"
+      - "LambdaRole"
+    Properties:
+      Handler: "index.lambda_handler"
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: "python3.8"
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import json
+
+
+          def get_first_instance():
+              client = boto3.client('autoscaling')
+              return client.describe_auto_scaling_groups() \
+                  ["AutoScalingGroups"][0]["Instances"][0]
+
+
+          def lambda_handler(event, context):
+              first_instance = get_first_instance()
+              response = boto3.client("ec2").create_tags(
+                  Resources=[first_instance["InstanceId"]],
+                  Tags=[
+                      {"Key": "joule:enrolled", "Value": "1"}
+                  ],
+              )
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, "CustomResourcePhysicalID")
+              return {
+                  'statusCode': 200,
+                  'body': first_instance["InstanceId"].strip()
+              }
+  LeaderNodeTaggerTrigger:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: LeaderNodeTagger
+    Version: "1.0"
+    Properties:
+      ServiceToken: !GetAtt LeaderNodeTagger.Arn
