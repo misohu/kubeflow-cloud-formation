@@ -50,7 +50,7 @@ Parameters:
     Type: String
     MinLength: "3"
     AllowedPattern: '[a-zA-Z0-9\(\)\.\-/_]+'
-    Default: "MicroK8s-single-instance"
+    Default: "kubeflow-single-instance"
   KeyPair:
     Description: Amazon EC2 Key Pair used to ssh to the cluster nodes
     Type: "AWS::EC2::KeyPair::KeyName"
@@ -88,9 +88,25 @@ Parameters:
     AllowedPattern: '[a-zA-Z0-9\(\)\.\-/_@]+'
     Default: "user123"
     Description: Default is user123
+  VpcCIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC or use Default
+    Type: String
+    Default: 10.192.0.0/16
+  PublicSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet (random Availability Zone will be assigned)
+    Type: String
+    Default: 10.192.10.0/24
 Resources:
+  SecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: Kubeflow allow all egress rule
+      GroupDescription: "Kubeflow instance security group without ingress rules"
+      VpcId: !Ref VPC
+  
   EC2LaunchTemplate:
     Type: "AWS::EC2::LaunchTemplate"
+    DependsOn: SecurityGroupEgress
     Properties:
       LaunchTemplateName: !Sub "${AppName}"
       LaunchTemplateData:
@@ -148,6 +164,8 @@ Resources:
           - !Ref AWS::Region
           - AMI
         InstanceType: !Sub "${InstanceTypeParameter}"
+        SecurityGroupIds:
+          - !Ref SecurityGroupEgress
   EC2Role:
     Type: "AWS::IAM::Role"
     Properties:
@@ -173,6 +191,46 @@ Resources:
               - Action: ec2:DescribeTags
                 Effect: Allow
                 Resource: "*"
+  AutoScalingAutoScalingGroup:
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    Properties:
+      AutoScalingGroupName: !Sub "${AppName}"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref EC2LaunchTemplate
+        Version: 1
+      MinSize: 1
+      MaxSize: 1
+      DesiredCapacity: 1
+      Cooldown: 300
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet
+      HealthCheckType: "EC2"
+      HealthCheckGracePeriod: 300
+      TerminationPolicies:
+        - "NewestInstance"
+      ServiceLinkedRoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling_${AppName}"
+      NewInstancesProtectedFromScaleIn: false
+    DependsOn:
+      - EC2LaunchTemplate
+      - AutoScalingRole
+      - PublicSubnet
+      - PublicSubnetRouteTableAssociation
+      - SecurityGroupEgress
+  AutoScalingScalingPolicy:
+    Type: "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AutoScalingGroupName: !Sub "${AppName}"
+      PolicyType: "SimpleScaling"
+      AdjustmentType: "ChangeInCapacity"
+      ScalingAdjustment: 1
+    DependsOn: "AutoScalingAutoScalingGroup"
+  AutoScalingRole:
+    Type: "AWS::IAM::ServiceLinkedRole"
+    Properties:
+      AWSServiceName: autoscaling.amazonaws.com
+      Description: AutoScaling ServiceLinked Role
+      CustomSuffix: !Sub "${AppName}"
+  
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
     DependsOn: "EC2Role"
@@ -180,9 +238,50 @@ Resources:
       InstanceProfileName: !Sub "${AppName}-InstanceProfile"
       Roles:
         - !Ref EC2Role
-  Instance:
-    Type: 'AWS::EC2::Instance'
+  
+  VPC:
+    Type: AWS::EC2::VPC
     Properties:
-      LaunchTemplate:
-        LaunchTemplateId: !Ref EC2LaunchTemplate
-        Version: 1
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value:  !Join ['', [!Ref "AWS::StackName", "-VPC" ]]
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    DependsOn: VPC
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet1CIDR
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Public-A
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: Public
+  PublicRoute1:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable

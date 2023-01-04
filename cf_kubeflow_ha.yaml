@@ -4,7 +4,7 @@ Mappings:
     eu-central-1:
       AMI: ami-xxxxxxxxxxxxxxxxx
     us-east-1:
-      AMI: ami-072d6c9fae3253f26
+      AMI: ami-0ea0f37840b2f2b19
     us-gov-east-1:
       AMI: ami-xxxxxxxxxxxxxxxxx
     us-gov-west-1:
@@ -56,7 +56,7 @@ Parameters:
     Type: "AWS::EC2::KeyPair::KeyName"
   InstanceTypeParameter:
     Type: String
-    Default: m4.2xlarge
+    Default: m4.large
     AllowedValues:
       - m4.large
       - m4.xlarge
@@ -64,32 +64,15 @@ Parameters:
     Description: Select the instance type of the cluster nodes
   KubernetesVersion:
     Type: String
-    Default: 1.22
+    Default: 1.23
     AllowedValues:
       - 1.23
       - 1.22
       - 1.21
     Description: The Kubernetes version
-  KubeflowVersion:
-    Type: String
-    Default: 1.6/stable
-    AllowedValues:
-      - 1.6/stable
-      - latest/stable
-      - latest/edge
-    Description: The Kubeflow version to be deployed
-  KubeflowDashboardUsername:
-    Type: String
-    MinLength: "5"
-    AllowedPattern: '[a-zA-Z0-9\(\)\.\-/_@]+'
-    Default: "user123@email.com"
-  KubeflowDashboardPassword:
-    Type: String
-    NoEcho : "true"
-    MinLength: "5"
-    AllowedPattern: '[a-zA-Z0-9\(\)\.\-/_@]+'
-    Default: "user123"
-    Description: Default is user123
+  SubNet:
+    Description: Amazon VPC Subnet to deploy the cluster on
+    Type: "AWS::EC2::Subnet::Id"
 Resources:
   SQSQueue:
     Type: "AWS::SQS::Queue"
@@ -182,40 +165,13 @@ Resources:
           Fn::Base64: !Sub |
             #!/bin/bash
 
-            apt update
-            apt -y upgrade
-            for snap in juju juju-wait charmcraft; do sudo snap install $snap --classic; done
-            snap install joule-expansion --classic
-            snap install microk8s --classic --channel=${KubernetesVersion}/stable
-            sudo snap refresh charmcraft --channel latest/candidate
+            snap refresh joule-expansion --classic
+            snap refresh microk8s --classic --channel=${KubernetesVersion}/stable
             usermod -a -G microk8s ubuntu
             mkdir /home/ubuntu/.kube
             chown -f -R ubuntu /home/ubuntu/.kube
             snap set joule-expansion provider=aws
             snap set joule-expansion applications=microk8s
-
-            microk8s enable dns storage metallb:"10.64.140.43-10.64.140.49,192.168.0.105-192.168.0.111"
-            sleep 120
-            microk8s.kubectl wait --for=condition=available -nkube-system deployment/coredns deployment/hostpath-provisioner
-            microk8s.kubectl -n kube-system rollout status ds/calico-node
-
-            su ubuntu -c 'juju bootstrap microk8s uk8s-controller'
-            su ubuntu -c 'juju add-model kubeflow'
-            su ubuntu -c 'juju deploy kubeflow --channel=${KubeflowVersion} --trust'
-
-            su ubuntu -c 'juju config dex-auth public-url=http://10.64.140.43.nip.io; juju config oidc-gatekeeper public-url=http://10.64.140.43.nip.io; juju config dex-auth static-username=${KubeflowDashboardUsername}; juju config dex-auth static-password=${KubeflowDashboardPassword}'
-            sleep 720
-            echo "Charmed Kubeflow deployed"
-
-            su ubuntu -c 'juju run --unit istio-pilot/0 -- "export JUJU_DISPATCH_PATH=hooks/config-changed; ./dispatch"'
-            su ubuntu -c 'juju deploy mlflow-server'
-            su ubuntu -c 'juju deploy charmed-osm-mariadb-k8s mlflow-db'
-            su ubuntu -c 'juju relate minio mlflow-server'
-            su ubuntu -c 'juju relate istio-pilot mlflow-server'
-            su ubuntu -c 'juju relate mlflow-db mlflow-server'
-            su ubuntu -c 'juju relate mlflow-server admission-webhook'
-            
-            echo "Charmed MlFlow deployed"
         BlockDeviceMappings:
           - DeviceName: "/dev/sda1"
             Ebs:
@@ -246,9 +202,8 @@ Resources:
       MaxSize: 1
       DesiredCapacity: 1
       Cooldown: 300
-      AvailabilityZones:
-        Fn::GetAZs:
-          Ref: "AWS::Region"
+      VPCZoneIdentifier:
+        - !Ref SubNet
       HealthCheckType: "EC2"
       HealthCheckGracePeriod: 300
       TerminationPolicies:
