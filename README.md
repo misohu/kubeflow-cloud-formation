@@ -23,3 +23,10 @@ juju status --watch 5s
 ```
 
 After the juju components are in Active state, setup your browser Proxy (Firefox: Settings > Network  Settings > Socks proxy set to 127.0.0.1 and port 9999, or the one you tunnel). Now you can wisit `http://10.64.140.43.nip.io` and use the default credentials (user123@email.com/user123).
+
+
+## Cost estimates
+The only charged aws resource within the template is the ec2 instance `t2.2xlarge` with `gp2` volume of size `100GB`. You can find the cost caluculation at [this link](https://calculator.aws/#/estimate?id=2c3ee088d98101f4c1bb1e41cc86704e7a52ddd2)
+
+## Archytecture
+You can find the archytectural diagram for the template in the file `template1-designer.png`.
