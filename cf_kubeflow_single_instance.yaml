@@ -1,10 +1,10 @@
-AWSTemplateFormatVersion: "2010-09-09"
+AWSTemplateFormatVersion: 2010-09-09
 Mappings:
   RegionMap:
     eu-central-1:
       AMI: ami-xxxxxxxxxxxxxxxxx
     us-east-1:
-      AMI: ami-072d6c9fae3253f26
+      AMI: ami-0b93ce03dcbcb10f6
     us-gov-east-1:
       AMI: ami-xxxxxxxxxxxxxxxxx
     us-gov-west-1:
@@ -16,8 +16,6 @@ Mappings:
     us-west-2:
       AMI: ami-xxxxxxxxxxxxxxxxx
     ca-central-1:
-      AMI: ami-xxxxxxxxxxxxxxxxx
-    eu-central-1:
       AMI: ami-xxxxxxxxxxxxxxxxx
     eu-west-1:
       AMI: ami-xxxxxxxxxxxxxxxxx
@@ -60,6 +58,11 @@ Parameters:
     AllowedValues:
       - t2.2xlarge
     Description: Select the instance type of the cluster nodes
+  InstanceVolumeSize:
+    Type: Number
+    Default: 100
+    MinValue: 100
+    Description: Size of the (unencripted DeleteOnTermination) gp2 volume attatched to the instance
   KubernetesVersion:
     Type: String
     Default: 1.22
@@ -150,7 +153,7 @@ Resources:
             Ebs:
               Encrypted: false
               DeleteOnTermination: true
-              VolumeSize: 100
+              VolumeSize: !Ref InstanceVolumeSize
               VolumeType: "gp2"
         IamInstanceProfile:
           Arn: !GetAtt
